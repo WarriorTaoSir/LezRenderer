@@ -398,3 +398,30 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Visual Studio 生成文件
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+[Dd]ebug/
+[Rr]elease/
+*.pdb
+*.ilk
+*.sdf
+*.opensdf
+*.suo
+*.user
+*.VC.db
+*.VC.VC.opendb
+
+# 编译产物
+*.exe
+*.dll
+*.lib
+
+# Vulkan Shader缓存（可选）
+*.spv
+
+# 在.gitignore中添加
+*.vcxproj.user
