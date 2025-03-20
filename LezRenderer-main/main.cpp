@@ -1,35 +1,66 @@
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
-#define GLM_FORCE_RADIANS
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE
-#include <glm/vec4.hpp>
-#include <glm/mat4x4.hpp>
-
 #include <iostream>
+#include <stdexcept>
+#include <cstdlib>
 
-int main() {
-    glfwInit();
+const uint32_t WIDTH = 800;
+const uint32_t HEIGHT = 600;
 
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    GLFWwindow* window = glfwCreateWindow(800, 600, "Vulkan window", nullptr, nullptr);
-
-    uint32_t extensionCount = 0;
-    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
-
-    std::cout << extensionCount << " extensions supported\n";
-
-    glm::mat4 matrix;
-    glm::vec4 vec;
-    auto test = matrix * vec;
-
-    while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
+class HelloTriangleApplication {
+public:
+    void run() {
+        initWindow();
+        initVulkan();
+        mainLoop();
+        cleanup();
     }
 
-    glfwDestroyWindow(window);
+private:
+    // Initialize the window
+    void initWindow() {
+        glfwInit();
+        // Do not create an OpenGL context
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        // disable the resize
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        // the window(width, height, title, screenIndex, someting relevant to OpenGL)
+        window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+    }
+    // allocate the resources
+    void initVulkan() {
 
-    glfwTerminate();
+    }
 
-    return 0;
+    // 
+    void mainLoop() {
+        
+        while (!glfwWindowShouldClose(window)) {
+            std::cout << "hello" << std::endl;
+            glfwPollEvents();
+        }
+    }
+
+    // deallocate the resources
+    void cleanup() {
+        glfwDestroyWindow(window);
+
+        glfwTerminate();
+    }
+private:
+    GLFWwindow* window; // the window to show
+};
+
+int main() {
+    HelloTriangleApplication app;
+
+    try {
+        app.run();
+    }
+    catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl; // catch the runtime error
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }
