@@ -106,6 +106,7 @@
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>C:\Tools\Microsoft Visual Studio\Libraries\glm;C:\Tools\Microsoft Visual Studio\Libraries\glfw-3.4.bin.WIN64\include;D:\OtherSoftware\SDK\Vulkan\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -124,6 +125,7 @@
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>C:\Tools\Microsoft Visual Studio\Libraries\glm;C:\Tools\Microsoft Visual Studio\Libraries\glfw-3.4.bin.WIN64\include;D:\OtherSoftware\SDK\Vulkan\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
