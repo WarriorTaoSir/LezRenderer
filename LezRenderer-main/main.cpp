@@ -1,5 +1,8 @@
+#define VK_USE_PLATFORM_WIN32_KHR
 #define GLFW_INCLUDE_VULKAN // 让GLFW自动包含Vulkan头文件
 #include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
 
 #include <iostream>
 #include <stdexcept>
@@ -8,6 +11,10 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <set>
+#include <cstdint> // Necessary for uint32_t
+#include <limits> // Necessary for std::numeric_limits
+#include <algorithm> // Necessary for std::clamp
 
 // 窗口尺寸常量
 const uint32_t WIDTH = 800;
@@ -16,6 +23,11 @@ const uint32_t HEIGHT = 600;
 // 启用的验证层列表（Khronos官方验证层）
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
+};
+
+
+const std::vector<const char*> deviceExtensions = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
 };
 
 // 根据编译模式决定是否启用验证层
@@ -50,12 +62,21 @@ void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT
 // 用于存储物理设备支持的队列家族索引
 struct QueueFamilyIndices {
     std::optional<uint32_t> graphicsFamily; // 图形队列家族索引（可能不存在）
+    std::optional<uint32_t> presentFamily;  // 展示队列家族索引（可能不存在）
 
     // 检查所有必需的队列家族是否已找到
     bool isComplete() {
-        return graphicsFamily.has_value(); // 当前仅需图形队列即可视为“完整”
+        return graphicsFamily.has_value() && presentFamily.has_value(); // 当前仅需图形队列即可视为“完整”
     }
 };
+
+// 交换链支持细节
+struct SwapChainSupportDetails {
+    VkSurfaceCapabilitiesKHR capabilities;
+    std::vector<VkSurfaceFormatKHR> formats;
+    std::vector<VkPresentModeKHR> presentModes;
+};
+
 
 // 主应用程序类
 class HelloTriangleApplication {
@@ -81,8 +102,11 @@ private:
     void initVulkan() {
         createInstance();
         setupDebugMessenger();
+        createSurface();
         pickPhysicalDevice();
         createLogicalDevice();
+        createSwapChain();
+        createImageView();
     }
 
     // 主事件循环
@@ -95,6 +119,13 @@ private:
 
     // 释放资源
     void cleanup() {
+        // 释放图像视图
+        for (auto imageView : swapChainImageViews) {
+            vkDestroyImageView(device, imageView, nullptr);
+        }
+
+        vkDestroySwapchainKHR(device, swapChain, nullptr); // 销毁交换链
+
         vkDestroyDevice(device, nullptr);           // 销毁逻辑设备
 
         // 如果启用了验证层
@@ -102,6 +133,8 @@ private:
             // 摧毁创建的调试Messenger
             DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);   // 先销毁调试信使
         }
+
+        vkDestroySurfaceKHR(instance, surface, nullptr); // 销毁窗口表面
 
         vkDestroyInstance(instance, nullptr);       // 销毁Vulkan实例
 
@@ -182,6 +215,13 @@ private:
         }
     }
 
+    // 创建窗口表面
+    void createSurface() {
+        if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create window surface!");
+        }
+    }
+
     // 检查所有验证层是否收到支持
     bool checkValidationLayerSupport() {
         uint32_t layerCount;
@@ -253,20 +293,30 @@ private:
         }
     }
 
-    // 创建逻辑设备
+    // 创建Vulkan逻辑设备（Logical Device），配置所需队列家族，并获取图形和呈现队列句柄，为后续渲染和显示操作提供接口
     void createLogicalDevice() {
-        // 获取物理设备支持的队列家族索引（例如图形队列家族）
+        // 获取物理设备支持的队列家族索引（图形和展示队列）
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
         // 配置队列创建信息（这里创建图形队列）
-        VkDeviceQueueCreateInfo queueCreateInfo{};
-        queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.value();
-        queueCreateInfo.queueCount = 1;
+        std::vector<VkDeviceQueueCreateInfo> queueCreateInfos{};
+        // 使用set自动去重，避免重复创建同一队列家族的多个队列
+        std::set<uint32_t> uniqueQueueFamilies = 
+        {   
+            indices.graphicsFamily.value(), 
+            indices.presentFamily.value() 
+        };
 
-        // 设置队列优先级（范围0.0~1.0，影响GPU资源分配）
+        // 为每个队列家族分配优先级并创建配置
         float queuePriority = 1.0f;
-        queueCreateInfo.pQueuePriorities = &queuePriority;
+        for (uint32_t queueFamily : uniqueQueueFamilies) {
+            VkDeviceQueueCreateInfo queueCreateInfo{};
+            queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+            queueCreateInfo.queueFamilyIndex = queueFamily;
+            queueCreateInfo.queueCount = 1;
+            queueCreateInfo.pQueuePriorities = &queuePriority;
+            queueCreateInfos.push_back(queueCreateInfo);
+        }
 
         // 初始化设备功能需求（此处未启用任何特殊功能）
         VkPhysicalDeviceFeatures deviceFeatures{};
@@ -274,17 +324,139 @@ private:
         // 配置逻辑设备创建信息
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        createInfo.pQueueCreateInfos = &queueCreateInfo;
-        createInfo.queueCreateInfoCount = 1;
+        createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+        createInfo.pQueueCreateInfos = queueCreateInfos.data();
         createInfo.pEnabledFeatures = &deviceFeatures;
+
+        // 启用设备扩展（如交换链扩展）
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+        createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+
+        // 启用验证层（调试用）
+        if (enableValidationLayers) {
+            createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+            createInfo.ppEnabledLayerNames = validationLayers.data();
+        } 
+        else {
+            createInfo.enabledLayerCount = 0;
+        }
+
 
         // 创建逻辑设备（与物理设备关联的软件抽象）
         if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
             throw std::runtime_error("failed to create logical device!");
         }
-        // 获取设备中创建的图形队列句柄（后续用于提交绘图命令）
-        // 参数说明：设备对象, 队列家族索引, 队列索引（同一家族中可能有多个队列），输出队列句柄
+        
+        // 获取图形队列句柄（用于提交渲染命令）
         vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
+        // 获取呈现队列句柄（用于显示图像到窗口）
+        vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
+    }
+
+    // 创建Vulkan交换链（Swapchain），管理渲染图像队列以实现屏幕显示
+    void createSwapChain() {
+        // 获取物理设备对交换链的支持详情（能力、格式、呈现模式）
+        SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
+
+        // 选择最佳交换链配置参数
+        VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+        VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
+        VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
+
+        // 计算交换链图像数量（在设备支持的范围内）
+        uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1; // 最小值 + 1
+        if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
+            imageCount = swapChainSupport.capabilities.maxImageCount; // 截断
+        }
+
+        // 配置交换链创建参数
+        VkSwapchainCreateInfoKHR createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR; // 结构体类型标识
+        createInfo.surface = surface; // 关联的窗口表面（由GLFW或其他窗口库创建）
+
+        // 图像参数配置
+        createInfo.minImageCount = imageCount;                      // 交换链图像数量
+        createInfo.imageFormat = surfaceFormat.format;              // 像素格式（如VK_FORMAT_B8G8R8A8_SRGB）
+        createInfo.imageColorSpace = surfaceFormat.colorSpace;      // 颜色空间（如VK_COLOR_SPACE_SRGB_NONLINEAR_KHR）
+        createInfo.imageExtent = extent;                            // 图像分辨率（宽高）
+        createInfo.imageArrayLayers = 1;                            // 图像层数（3D应用可能需要多层，此处设为1）
+        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;// 图像用途：作为颜色附件（渲染目标）
+
+        // 处理队列家族共享模式（图形队列 vs 呈现队列）
+        QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+        uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
+
+        // 如果图形队列和呈现队列属于不同家族，需配置为并发共享模式
+        if (indices.graphicsFamily != indices.presentFamily) {
+            createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;   // 并发模式：多队列家族共享图像
+            createInfo.queueFamilyIndexCount = 2;                       // 参与的队列家族数量
+            createInfo.pQueueFamilyIndices = queueFamilyIndices;        // 队列家族索引数组
+        }
+        else {
+            createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;    // 独占模式：单队列家族独占访问（性能更优）
+            createInfo.queueFamilyIndexCount = 0;                                 
+            createInfo.pQueueFamilyIndices = nullptr; 
+        }
+
+        // 配置图像变换和透明度（默认无变换且不透明）
+        createInfo.preTransform = swapChainSupport.capabilities.currentTransform;
+        createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+
+        // 设置呈现模式和裁剪行为
+        createInfo.presentMode = presentMode;       // 选择的呈现模式（如VK_PRESENT_MODE_MAILBOX_KHR）
+        createInfo.clipped = VK_TRUE;               // 启用裁剪：忽略被遮挡的像素（优化性能）
+        createInfo.oldSwapchain = VK_NULL_HANDLE;   // 旧交换链句柄（重建交换链时可用于优化）
+
+        // 创建交换链对象
+        if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create swap chain!");   // 失败时抛出异常
+        }
+
+        // 获取交换链中的图像列表（拿到所有“画布”）
+        vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr);                   // 先问有多少张图
+        swapChainImages.resize(imageCount);                                                 // 准备好容器
+        vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());    // 拿到所有图的句柄
+
+        // 保存配置参数(后续渲染要用)
+        swapChainImageFormat = surfaceFormat.format;    // 记住像素格式
+        swapChainExtent = extent;                       // 记住分辨率
+    }
+
+    // 为交换链中的每个图像创建图像视图（ImageView），以便在渲染管线中访问图像数据
+    void createImageView() {
+        // 根据交换链中的图像数量，调整图像视图容器的大小
+        swapChainImageViews.resize(swapChainImages.size());
+
+        // 遍历交换链中的每个图像，为其创建对应的图像视图
+        for (size_t i = 0; i < swapChainImages.size(); i++) {
+            // 配置图像视图的创建参数
+            VkImageViewCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;    // 结构体类型标识
+            createInfo.image = swapChainImages[i];                          // 绑定到交换链中的第i个图像
+ 
+            // 定义图像视图的类型和格式
+            createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;    // 视图类型：2D纹理（也支持1D、3D、CubeMap等）
+            createInfo.format = swapChainImageFormat;       // 图像格式（需与交换链的格式一致）
+
+
+            // 配置颜色通道映射（此处保持默认RGBA顺序）
+            createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+
+            // 配置子资源范围（定义视图能访问图像的哪些部分）
+            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; // 视图用于颜色数据
+            createInfo.subresourceRange.baseMipLevel = 0;                       // 起始Mipmap级别（0表示基础级别）
+            createInfo.subresourceRange.levelCount = 1;                         // Mipmap层级数量（此处仅1级，无多级渐远）
+            createInfo.subresourceRange.baseArrayLayer = 0;                     // 起始数组层（0表示基础层）
+            createInfo.subresourceRange.layerCount = 1;                         // 数组层数量（此处仅1层，非纹理数组）
+
+            // 创建图像视图对象
+            if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create image views!");
+            }
+        }
     }
 
     // 计算设备合适度——自定义选择物理设备的过程
@@ -314,11 +486,44 @@ private:
         return score;
     }
 
-    // 检查设备是否满足最低要求（队列家族是否完整）
+    // 综合判断物理设备是否满足应用需求（队列/扩展/交换链支持）
     bool isDeviceSuitable(VkPhysicalDevice device) {
-        QueueFamilyIndices indices = findQueueFamilies(device); // 查找队列家族
+        // ▼ 条件1：检查设备是否支持必要的队列家族（图形队列和呈现队列）
+        QueueFamilyIndices indices = findQueueFamilies(device); 
 
-        return indices.isComplete(); // 是否找齐了所有必须的队列（目前只需图形队列）
+        // ▼ 条件2：检查设备是否支持所有要求的扩展（如交换链扩展）
+        bool extensionsSupported = checkDeviceExtensionSupport(device);
+
+        // ▼ 条件3：检查交换链支持是否足够（至少有一个格式和一个呈现模式）
+        bool swapChainAdequate = false;
+        if (extensionsSupported) {
+            SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device);
+            swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
+        }
+
+        // 所有条件必须同时满足：队列完整、扩展支持、交换链可用
+        return indices.isComplete() && extensionsSupported && swapChainAdequate;
+    }
+    
+    // 检查物理设备（GPU) 是否支持所有必须的扩展
+    bool checkDeviceExtensionSupport(VkPhysicalDevice device) {
+        // 获取设备支持的扩展总数
+        uint32_t extensionCount;
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr); // 获取count
+        // 获取所有可用扩展的详细信息
+        std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
+
+        // 将需要的扩展列表转换为集合，便于快速查找和删除
+        std::set<std::string> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
+
+        // 遍历所有可用扩展，从需求集合中移除已找到的扩展
+        for (const auto& extension : availableExtensions) {
+            requiredExtensions.erase(extension.extensionName); // 删除匹配的扩展名
+        }
+
+        // 若需求集合为空，说明所有扩展都支持；否则存在缺失
+        return requiredExtensions.empty();
     }
 
     // 遍历设备的所有队列家族，记录支持的队列索引
@@ -338,6 +543,17 @@ private:
         for (const auto& queueFamily : queueFamilies) {
             if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
                 indices.graphicsFamily = i;
+
+                // 检查当前队列家族是否支持呈现（Present）到窗口表面
+                VkBool32 presentSupport = false;
+                vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
+
+                // 如果支持呈现，则记录呈现队列家族索引
+                if (presentSupport) {
+                    indices.presentFamily = i;
+                }
+
+                // 如果已找到所有需要的队列家族，提前退出循环
                 if (indices.isComplete()) {
                     break;
                 }
@@ -346,6 +562,84 @@ private:
         }
 
         return indices;
+    }
+
+    // 查询物理设备对交换链（Swapchain）的支持细节，包括表面能力、格式和呈现模式
+    SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device) {
+        SwapChainSupportDetails details;
+
+        // 获取表面基础能力（如图像数量范围、最小/最大尺寸）
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+
+        // 获取支持的表面格式（如颜色空间、像素格式）
+        uint32_t formatCount;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
+
+        if (formatCount != 0) {
+            details.formats.resize(formatCount); // 预分配内存
+            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
+        }
+
+        // 获取支持的呈现模式（如垂直同步、立即模式）
+        uint32_t presentModeCount;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
+
+        if (presentModeCount != 0) {
+            details.presentModes.resize(presentModeCount);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+        }
+
+        return details; // 返回交换链支持的三类信息
+    }
+
+    // 选择交换链表面模式
+    VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
+        for (const auto& availableFormat : availableFormats) {
+            if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                return availableFormat;
+            }
+        }
+
+        return availableFormats[0];
+    }
+
+    // 交换链展示模式
+    VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
+        for (const auto& availablePresentMode : availablePresentModes) {
+            if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
+                return availablePresentMode;
+            }
+        }
+
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) {
+        // 情况1：当前范围已被明确指定（直接使用） 
+        if (capabilities.currentExtent.width != (std::numeric_limits<uint32_t>::max)()) {
+            return capabilities.currentExtent;
+        }
+        else {// 情况2：窗口管理器允许自定义范围（需手动计算）
+            // 获取窗口的像素分辨率（例如 Retina 显示屏的实际像素可能更高）
+            int width, height;
+            glfwGetFramebufferSize(window, &width, &height);
+
+            VkExtent2D actualExtent = {
+                static_cast<uint32_t>(width),
+                static_cast<uint32_t>(height)
+            };
+
+            // 将分辨率限制在硬件支持的范围内（避免越界）
+            actualExtent.width = std::clamp(actualExtent.width,
+                capabilities.minImageExtent.width,
+                capabilities.maxImageExtent.width);
+
+            actualExtent.height = std::clamp(actualExtent.height,
+                capabilities.minImageExtent.height,
+                capabilities.maxImageExtent.height);
+
+            return actualExtent;
+        }
     }
 
     // 调试回调函数（静态成员函数）
@@ -363,9 +657,16 @@ private:
     GLFWwindow* window;                                 // GLFW窗口句柄
     VkInstance instance;                                // Vulkan实例
     VkDebugUtilsMessengerEXT debugMessenger;            // 调试回调信使
+    VkSurfaceKHR surface;                               // 窗口表面 
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;   // 物理设备句柄
     VkDevice device;                                    // 逻辑设备句柄
     VkQueue graphicsQueue;                              // 图形队列
+    VkQueue presentQueue;                               // 展示队列
+    VkSwapchainKHR swapChain;                           // 交换链
+    std::vector<VkImage> swapChainImages;               // 交换链图片
+    VkFormat swapChainImageFormat;                      // 像素格式
+    VkExtent2D swapChainExtent;                         // 分辨率
+    std::vector<VkImageView> swapChainImageViews;       // 交换链的图像视图
 };
 
 // 程序入口
