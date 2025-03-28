@@ -117,6 +117,7 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;  // 用于判断这一帧渲染是否完成
     std::vector<VkFence> inFlightFences;                // 确保一次只渲染一帧画面
 
+    bool framebufferResized = false;                    // 帧缓冲是否被更改大小
     uint32_t currentFrame = 0;
 
 private:
@@ -124,9 +125,11 @@ private:
     void initWindow() {
         glfwInit();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // 不使用OpenGL上下文
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE); // 禁用窗口缩放
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+        
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
 
     // 初始化Vulkan核心组件
@@ -137,7 +140,7 @@ private:
         pickPhysicalDevice();
         createLogicalDevice();
         createSwapChain();
-        createImageView();
+        createImageViews();
         createRenderPass();
         createGraphicsPipeline();
         createFramebuffers();
@@ -160,20 +163,8 @@ private:
 
     // 释放资源
     void cleanup() {
-        // 销毁信号量
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
-            vkDestroyFence(device, inFlightFences[i], nullptr);
-        }
+        cleanupSwapChain();
 
-        // 销毁命令缓冲池
-        vkDestroyCommandPool(device, commandPool, nullptr);
-
-        // 销毁所有帧缓冲
-        for (auto framebuffer : swapChainFramebuffers) {
-            vkDestroyFramebuffer(device, framebuffer, nullptr);
-        }
         // 销毁图形管线
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         // 销毁管线布局
@@ -181,14 +172,16 @@ private:
         // 销毁渲染通道
         vkDestroyRenderPass(device, renderPass, nullptr);
 
-        // 释放图像视图
-        for (auto imageView : swapChainImageViews) {
-            vkDestroyImageView(device, imageView, nullptr);
+        // 销毁信号量
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+            vkDestroyFence(device, inFlightFences[i], nullptr);
         }
 
-        vkDestroySwapchainKHR(device, swapChain, nullptr); // 销毁交换链
+        vkDestroyCommandPool(device, commandPool, nullptr); // 销毁命令缓冲池
 
-        vkDestroyDevice(device, nullptr);           // 销毁逻辑设备
+        vkDestroyDevice(device, nullptr);                   // 销毁逻辑设备
 
         // 如果启用了验证层
         if (enableValidationLayers) {
@@ -485,7 +478,7 @@ private:
     }
 
     // 为交换链中的每个图像创建图像视图（ImageView），以便在渲染管线中访问图像数据
-    void createImageView() {
+    void createImageViews() {
         // 根据交换链中的图像数量，调整图像视图容器的大小
         swapChainImageViews.resize(swapChainImages.size());
 
@@ -766,6 +759,7 @@ private:
 
     // 创建命令缓冲区（用于记录并提交渲染指令到GPU）
     void createCommandBuffers() {
+        commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         // 配置命令缓冲区分配参数
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;   // 结构体类型标识
@@ -775,7 +769,7 @@ private:
 
         // 指定为"主命令缓冲区"（可直接提交到队列执行，次级缓冲区需依附于主缓冲区）
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; 
-        allocInfo.commandBufferCount = 1; // 分配数量（当前仅需1个，若多帧并行处理可扩展为多个）
+        allocInfo.commandBufferCount = (uint32_t)commandBuffers.size(); // 分配数量（当前仅需2个，若多帧并行处理可扩展为多个）
 
         // 从命令池中分配命令缓冲区
         if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
@@ -850,8 +844,42 @@ private:
         // 完成录制（类似停止录音，此时命令缓冲区已包含完整指令序列）
     }
 
+    void cleanupSwapChain() {
+        for (size_t i = 0; i < swapChainFramebuffers.size(); i++) {
+            vkDestroyFramebuffer(device, swapChainFramebuffers[i], nullptr);
+        }
+
+        for (size_t i = 0; i < swapChainImageViews.size(); i++) {
+            vkDestroyImageView(device, swapChainImageViews[i], nullptr);
+        }
+
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
+    }
+
+    void recreateSwapChain() {
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+        // 最小化
+        while (width == 0 || height == 0) {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+
+        vkDeviceWaitIdle(device);
+
+        cleanupSwapChain();
+
+        createSwapChain();
+        createImageViews();
+        createFramebuffers();
+    }
+
     // 创建用于同步的信号量
     void createSyncObjects() {
+        // 初始化数组大小
+        imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
 
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -874,12 +902,10 @@ private:
     void drawFrame() {
         // 步骤1：等待前一帧渲染完成（避免资源竞争）
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-        // 步骤2：重置栅栏状态（为当前帧做准备）
-        vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
-        // 步骤3：从交换链获取下一帧图像（确定渲染目标）
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(
+        // 步骤2：从交换链获取下一帧图像（确定渲染目标），同时判断交换链是否过时
+        VkResult result = vkAcquireNextImageKHR(
             device,
             swapChain,
             UINT64_MAX,                                 // 超时时间（无限等待）
@@ -887,6 +913,17 @@ private:
             VK_NULL_HANDLE,                             // 不使用栅栏（此处用信号量同步）
             &imageIndex                                 // 输出：交换链图像的索引
         );
+        // 如果交换链过时则重置交换链并直接返回
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            recreateSwapChain();
+            return;
+        }
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+            throw std::runtime_error("failed to acquire swap chain image!");
+        }
+
+        // 步骤3：重置栅栏状态（为当前帧做准备）
+        vkResetFences(device, 1, &inFlightFences[currentFrame]);
         
         // 步骤4：重置并录制命令缓冲区（定义渲染操作）
         vkResetCommandBuffer(commandBuffers[currentFrame], 0);             // 重置命令缓冲区（复用内存）
@@ -902,8 +939,8 @@ private:
         VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = waitSemaphores;
-        submitInfo.pWaitDstStageMask = waitStages;
+        submitInfo.pWaitSemaphores = waitSemaphores;        // 从交换链中获取到图像-信号量
+        submitInfo.pWaitDstStageMask = waitStages;          
 
         // 提交的命令缓冲区（包含本帧的渲染指令）
         submitInfo.commandBufferCount = 1;
@@ -912,7 +949,7 @@ private:
         // 触发信号量：渲染完成后触发 renderFinishedSemaphore
         VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = signalSemaphores;
+        submitInfo.pSignalSemaphores = signalSemaphores;    // 图像渲染完成-信号量
 
         // 步骤6：提交命令到图形队列（启动GPU渲染）
         // - graphicsQueue: 目标队列（图形操作队列）
@@ -936,7 +973,17 @@ private:
         presentInfo.pImageIndices = &imageIndex;                // 要呈现的交换链图像索引（步骤3中获取的）
 
         // 提交呈现请求（将渲染完成的图像显示到屏幕）
-        vkQueuePresentKHR(presentQueue, &presentInfo);
+        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+
+        // 检查呈现结果
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
+            framebufferResized = false;
+            recreateSwapChain(); // 重建交换链
+        }
+        else if (result != VK_SUCCESS) {
+            throw std::runtime_error("failed to present swap chain image!");
+        }
+
         // 更新CurrentFrame
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
@@ -1176,6 +1223,12 @@ private:
         std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
         // 返回VK_FALSE表示“不终止程序运行”
         return VK_FALSE;
+    }
+
+    // 帧缓冲大小更改——回调函数
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
     }
 };
 
