@@ -17,6 +17,9 @@
 #include <algorithm>    // Necessary for std::clamp
 #include <fstream>
 
+#include <glm/glm.hpp>
+#include <array>
+
 // 窗口尺寸常量
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -78,6 +81,47 @@ struct SwapChainSupportDetails {
     std::vector<VkPresentModeKHR> presentModes;
 };
 
+// 顶点数据格式定义（包含位置和颜色）
+struct Vertex {
+    glm::vec2 pos;      // 位置属性（2D坐标，对应顶点着色器的 location=0）
+    glm::vec3 color;    // 颜色属性（RGB，对应顶点着色器的 location=1）
+
+    // 生成顶点数据绑定描述（Vulkan需要此信息读取内存中的顶点数据）
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+
+        bindingDescription.binding = 0;                                 // 绑定索引（从0开始，单缓冲时通常为0）
+        bindingDescription.stride = sizeof(Vertex);                     // 每个顶点数据的总字节大小（自动计算）
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;     // 按顶点步进（非实例化）
+
+        return bindingDescription;
+    }
+
+    // 生成顶点属性描述（定义每个属性的格式和位置）
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+        // 位置属性（pos）的描述
+        attributeDescriptions[0].binding = 0;                           // 绑定索引（与绑定描述一致）
+        attributeDescriptions[0].location = 0;                          // 顶点着色器的输入位置（location=0）
+        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;      // 数据格式（vec2）2个32位浮点数
+        attributeDescriptions[0].offset = offsetof(Vertex, pos);        // 偏移量（pos在结构体中的起始位置）
+
+        // 描述颜色属性（color）
+        attributeDescriptions[1].binding = 0;                           // 同一绑定（数据来自同一缓冲区）
+        attributeDescriptions[1].location = 1;                          // 顶点着色器的输入位置（location=1）
+        attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;   // 数据格式（vec3）3个32位浮点数
+        attributeDescriptions[1].offset = offsetof(Vertex, color);      // 偏移量（color的起始位置）
+
+        return attributeDescriptions;
+    }
+};
+
+const std::vector<Vertex> vertices = {
+    {{0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+};
 
 // 主应用程序类
 class HelloTriangleApplication {
@@ -88,6 +132,7 @@ public:
         mainLoop();     // 主循环处理事件
         cleanup();      // 清理资源
     }
+
 private:
     GLFWwindow* window;                                 // GLFW窗口句柄
     VkInstance instance;                                // Vulkan实例
@@ -120,6 +165,12 @@ private:
     bool framebufferResized = false;                    // 帧缓冲是否被更改大小
     uint32_t currentFrame = 0;
 
+    // Vulkan缓冲句柄
+    VkBuffer vertexBuffer;
+
+    // Vulkan缓冲对应的设备内存
+    VkDeviceMemory vertexBufferMemory;
+
 private:
     // 初始化GLFW窗口
     void initWindow() {
@@ -145,6 +196,7 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
+        createVertexBuffer();
         createCommandBuffers();
         createSyncObjects();
     }
@@ -164,6 +216,10 @@ private:
     // 释放资源
     void cleanup() {
         cleanupSwapChain();
+
+        // 销毁顶点Buffer以及回收对印内存
+        vkDestroyBuffer(device, vertexBuffer, nullptr);
+        vkFreeMemory(device, vertexBufferMemory, nullptr);
 
         // 销毁图形管线
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
@@ -602,13 +658,19 @@ private:
         // 5. 组合所有着色器阶段（顺序必须与渲染流程一致）
         VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
-        // 6. 配置顶点输入描述（当前为空，需根据实际顶点数据结构修改）
+        // 6. 配置顶点输入描述（根据实际顶点数据结构修改）
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 0;
-        vertexInputInfo.pVertexBindingDescriptions = nullptr; // Optional
-        vertexInputInfo.vertexAttributeDescriptionCount = 0;
-        vertexInputInfo.pVertexAttributeDescriptions = nullptr; // Optional
+
+            // 获取顶点数据的绑定描述和属性描述
+        auto bindingDescription = Vertex::getBindingDescription();          // 绑定描述（数据布局）
+        auto attributeDescriptions = Vertex::getAttributeDescriptions();    // 属性描述（每个字段的细节）
+        
+            // 配置顶点输入状态
+        vertexInputInfo.vertexBindingDescriptionCount = 1;                                  // 绑定描述的数量（单缓冲区）
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());  // 属性数量（此处为2）
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;                   // 绑定描述数组指针
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();        // 属性描述数组指针
 
         // 7. 配置输入装配方式（三角形列表）
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
@@ -757,6 +819,50 @@ private:
         }
     }
 
+    // 创建顶点缓冲区（用来存储顶点数据，如位置、颜色等）
+    void createVertexBuffer() {
+        // 步骤1：配置顶点缓冲区的创建参数
+        VkBufferCreateInfo bufferInfo{};                            // 初始化结构体为全零
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;    // 结构体类型标记（必填）
+        bufferInfo.size = sizeof(vertices[0]) * vertices.size();    // 缓冲区总大小（单个顶点数据大小 × 顶点数量）
+
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;       // 缓冲区用途：顶点数据（必须填对，否则无法绑定到Vertex Input）
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;         // 缓冲区共享模式：独占访问（仅在单一队列使用，避免多队列竞争资源）
+
+        // 步骤2：创建VkBuffer对象（此时尚未绑定实际内存）
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create vertex buffer!");
+        }
+
+        // 步骤3：查询缓冲区的内存需求（需了解对齐、内存类型等硬件限制）
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirements);
+
+        // 步骤4：分配符合要求的内存
+        VkMemoryAllocateInfo allocInfo{};
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;               // 内存分配结构体类型
+        allocInfo.allocationSize = memRequirements.size;                        // 分配的总内存大小（必须 ≥ 缓冲区的需求）                       
+        allocInfo.memoryTypeIndex = findMemoryType(                             // 选择合适的内存类型
+            memRequirements.memoryTypeBits,                                     // 支持的硬件内存类型位掩码
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT // 内存属性：可被CPU访问 (HOST_VISIBLE)，且CPU/GPU内存自动同步 (COHERENT)
+        );
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate vertex buffer memory!");
+        }
+
+        // 步骤5：将内存绑定到缓冲区（类似告诉GPU：“这个内存块给这个缓冲区用了”）
+        vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
+
+        // 步骤6：将顶点数据从CPU拷贝到GPU内存
+        void* data;
+        vkMapMemory(device, vertexBufferMemory, 0, bufferInfo.size, 0, &data);  // 映射内存，让CPU能访问（类似“锁定”内存）
+        memcpy(data, vertices.data(), (size_t)bufferInfo.size);                 // 复制顶点数据到映射的内存
+        vkUnmapMemory(device, vertexBufferMemory);                              // 解除映射（可选立即让CPU不可见，但因为COHERENT，数据已自动同步）
+
+    }
+
     // 创建命令缓冲区（用于记录并提交渲染指令到GPU）
     void createCommandBuffers() {
         commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -825,10 +931,15 @@ private:
         scissor.extent = swapChainExtent;                       // 裁剪区域尺寸（覆盖整个窗口）
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);         // 应用裁剪设置
 
+        // 将顶点缓存绑定
+        VkBuffer vertexBuffers[] = { vertexBuffer };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
         // --- 阶段6：发出绘制指令 ---
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
         // 参数解释：
-        // vertexCount: 3（绘制3个顶点，构成三角形）
+        // vertexCount: 顶点缓存的尺寸
         // instanceCount: 1（不启用实例化渲染）
         // firstVertex: 0（从顶点缓冲的0位置开始）
         // firstInstance: 0（实例ID从0开始）
@@ -896,6 +1007,21 @@ private:
                 throw std::runtime_error("failed to create semaphores!");
             }
         }
+    }
+
+    // 
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);    // 返回设备的全局内存信息
+
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+            // 检查内存类型是否支持且满足属性要求
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+
+        throw std::runtime_error("failed to find suitable memory type!");
     }
 
     // 绘制帧
