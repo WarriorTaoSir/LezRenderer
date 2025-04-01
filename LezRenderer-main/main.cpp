@@ -44,7 +44,7 @@ const bool enableValidationLayers = true;
 // 代理函数：动态加载并调用vkCreateDebugUtilsMessengerEXT
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
     // 通过vkGetInstanceProcAddr获取函数指针
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     // 如果成功获取函数指针，调用实际函数
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
@@ -117,10 +117,18 @@ struct Vertex {
     }
 };
 
+// 顶点属性数组
 const std::vector<Vertex> vertices = {
-    {{0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+};
+
+// 顶点索引数组
+// uint16_t适合少于65535顶点数的模型
+const std::vector<uint16_t> indices = {
+    0, 1, 2, 2, 3, 0
 };
 
 // 主应用程序类
@@ -167,9 +175,11 @@ private:
 
     // Vulkan缓冲句柄
     VkBuffer vertexBuffer;
+    VkBuffer indexBuffer;
 
     // Vulkan缓冲对应的设备内存
     VkDeviceMemory vertexBufferMemory;
+    VkDeviceMemory indexBufferMemory;
 
 private:
     // 初始化GLFW窗口
@@ -178,7 +188,7 @@ private:
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // 不使用OpenGL上下文
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
-        
+
         glfwSetWindowUserPointer(window, this);
         glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
@@ -197,13 +207,14 @@ private:
         createFramebuffers();
         createCommandPool();
         createVertexBuffer();
+        createIndexBuffer();
         createCommandBuffers();
         createSyncObjects();
     }
 
     // 主事件循环
     void mainLoop() {
-        
+
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
             drawFrame();
@@ -216,6 +227,10 @@ private:
     // 释放资源
     void cleanup() {
         cleanupSwapChain();
+
+        // 销毁索引Buffer以及回收对印内存
+        vkDestroyBuffer(device, indexBuffer, nullptr);
+        vkFreeMemory(device, indexBufferMemory, nullptr);
 
         // 销毁顶点Buffer以及回收对印内存
         vkDestroyBuffer(device, vertexBuffer, nullptr);
@@ -289,7 +304,7 @@ private:
             populateDebugMessengerCreateInfo(debugCreateInfo);
 
             // 将调试配置链接到实例创建信息中
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;  // 原代码强制转换不必要，直接取地址即可
+            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;  // 原代码强制转换不必要，直接取地址即可
         }
         else {
             // 不启用调试时，清空相关配置
@@ -412,10 +427,10 @@ private:
         // 配置队列创建信息（这里创建图形队列）
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos{};
         // 使用set自动去重，避免重复创建同一队列家族的多个队列
-        std::set<uint32_t> uniqueQueueFamilies = 
-        {   
-            indices.graphicsFamily.value(), 
-            indices.presentFamily.value() 
+        std::set<uint32_t> uniqueQueueFamilies =
+        {
+            indices.graphicsFamily.value(),
+            indices.presentFamily.value()
         };
 
         // 为每个队列家族分配优先级并创建配置
@@ -447,7 +462,7 @@ private:
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
-        } 
+        }
         else {
             createInfo.enabledLayerCount = 0;
         }
@@ -457,7 +472,7 @@ private:
         if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
             throw std::runtime_error("failed to create logical device!");
         }
-        
+
         // 获取图形队列句柄（用于提交渲染命令）
         vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
         // 获取呈现队列句柄（用于显示图像到窗口）
@@ -505,8 +520,8 @@ private:
         }
         else {
             createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;    // 独占模式：单队列家族独占访问（性能更优）
-            createInfo.queueFamilyIndexCount = 0;                                 
-            createInfo.pQueueFamilyIndices = nullptr; 
+            createInfo.queueFamilyIndexCount = 0;
+            createInfo.pQueueFamilyIndices = nullptr;
         }
 
         // 配置图像变换和透明度（默认无变换且不透明）
@@ -544,7 +559,7 @@ private:
             VkImageViewCreateInfo createInfo{};
             createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;    // 结构体类型标识
             createInfo.image = swapChainImages[i];                          // 绑定到交换链中的第i个图像
- 
+
             // 定义图像视图的类型和格式
             createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;    // 视图类型：2D纹理（也支持1D、3D、CubeMap等）
             createInfo.format = swapChainImageFormat;       // 图像格式（需与交换链的格式一致）
@@ -582,7 +597,7 @@ private:
         colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;             // 渲染后保存
 
         // 定义模板附件的加载/存储操作（当前未使用模板，设为DONT_CARE）
-        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;    
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 
         // 定义渲染开始和结束时附件的布局
@@ -600,7 +615,7 @@ private:
         subpass.colorAttachmentCount = 1;                               // 使用的颜色附件数量
         subpass.pColorAttachments = &colorAttachmentRef;
 
-        
+
         // 依赖关系的作用解释：
         // 1. 确保渲染通道开始前等待图像可用（通过 imageAvailableSemaphore）
         // 2. 控制图像布局从 UNDEFINED 自动转换为 COLOR_ATTACHMENT_OPTIMAL 的时机
@@ -662,11 +677,11 @@ private:
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 
-            // 获取顶点数据的绑定描述和属性描述
+        // 获取顶点数据的绑定描述和属性描述
         auto bindingDescription = Vertex::getBindingDescription();          // 绑定描述（数据布局）
         auto attributeDescriptions = Vertex::getAttributeDescriptions();    // 属性描述（每个字段的细节）
-        
-            // 配置顶点输入状态
+
+        // 配置顶点输入状态
         vertexInputInfo.vertexBindingDescriptionCount = 1;                                  // 绑定描述的数量（单缓冲区）
         vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());  // 属性数量（此处为2）
         vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;                   // 绑定描述数组指针
@@ -677,7 +692,7 @@ private:
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
         inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;                       // 三角形列表模式
         inputAssembly.primitiveRestartEnable = VK_FALSE;                                    // 禁用图元重启（用于索引缓冲）
-            
+
         // 8. 配置视口和裁剪矩形（使用动态状态，需在渲染时设置）
         VkPipelineViewportStateCreateInfo viewportState{};
         viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -809,7 +824,7 @@ private:
         VkCommandPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;            // 结构体类型标识
         // 允许单个命令缓冲区被重置（无需重置整个池）
-        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;   
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         // 指定关联的图形队列家族（命令缓冲区将提交到此队列）
         poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
 
@@ -819,48 +834,130 @@ private:
         }
     }
 
+    // 创建Buffer的 工具函数
+    // 参数说明：缓冲区大小（字节）、缓冲区用途（顶点缓冲、传输缓冲）、内存属性、输出的缓冲区对象、输出的设备内存
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        bufferInfo.usage = usage;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;         // 独占访问（仅一个队列家族使用）
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create buffer!");
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, buffer, &memRequirements);    // 查询内存需求
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate buffer memory!");
+        }
+
+        vkBindBufferMemory(device, buffer, bufferMemory, 0);                // 绑定内存到缓冲区
+    }
+
     // 创建顶点缓冲区（用来存储顶点数据，如位置、颜色等）
     void createVertexBuffer() {
-        // 步骤1：配置顶点缓冲区的创建参数
-        VkBufferCreateInfo bufferInfo{};                            // 初始化结构体为全零
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;    // 结构体类型标记（必填）
-        bufferInfo.size = sizeof(vertices[0]) * vertices.size();    // 缓冲区总大小（单个顶点数据大小 × 顶点数量）
+        // 计算顶点数据总字节数 = 单个顶点大小 × 顶点数量
+        VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
 
-        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;       // 缓冲区用途：顶点数据（必须填对，否则无法绑定到Vertex Input）
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;         // 缓冲区共享模式：独占访问（仅在单一队列使用，避免多队列竞争资源）
-
-        // 步骤2：创建VkBuffer对象（此时尚未绑定实际内存）
-        if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create vertex buffer!");
-        }
-
-        // 步骤3：查询缓冲区的内存需求（需了解对齐、内存类型等硬件限制）
-        VkMemoryRequirements memRequirements;
-        vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirements);
-
-        // 步骤4：分配符合要求的内存
-        VkMemoryAllocateInfo allocInfo{};
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;               // 内存分配结构体类型
-        allocInfo.allocationSize = memRequirements.size;                        // 分配的总内存大小（必须 ≥ 缓冲区的需求）                       
-        allocInfo.memoryTypeIndex = findMemoryType(                             // 选择合适的内存类型
-            memRequirements.memoryTypeBits,                                     // 支持的硬件内存类型位掩码
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT // 内存属性：可被CPU访问 (HOST_VISIBLE)，且CPU/GPU内存自动同步 (COHERENT)
+        // 1. 创建暂存缓冲区（Staging Buffer）
+        // -----------------------------------------------
+        // - 作用：临时存储CPU端数据，用于向GPU高效内存传输数据
+        // - 内存属性：CPU可见（HOST_VISIBLE） + 自动同步（HOST_COHERENT）
+        // - 用途：作为传输源（TRANSFER_SRC），后续将数据复制到设备本地缓冲区
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(
+            bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer,
+            stagingBufferMemory
         );
 
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) {
-            throw std::runtime_error("failed to allocate vertex buffer memory!");
-        }
-
-        // 步骤5：将内存绑定到缓冲区（类似告诉GPU：“这个内存块给这个缓冲区用了”）
-        vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
-
-        // 步骤6：将顶点数据从CPU拷贝到GPU内存
+        // 2. 将顶点数据从CPU复制到暂存缓冲区
+        // -----------------------------------------------
         void* data;
-        vkMapMemory(device, vertexBufferMemory, 0, bufferInfo.size, 0, &data);  // 映射内存，让CPU能访问（类似“锁定”内存）
-        memcpy(data, vertices.data(), (size_t)bufferInfo.size);                 // 复制顶点数据到映射的内存
-        vkUnmapMemory(device, vertexBufferMemory);                              // 解除映射（可选立即让CPU不可见，但因为COHERENT，数据已自动同步）
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);    // 映射内存，让CPU能访问（类似“锁定”内存）
+        memcpy(data, vertices.data(), (size_t)bufferSize);                   // 复制顶点数据到映射的内存
+        vkUnmapMemory(device, stagingBufferMemory);                                                      // 解除映射（可选立即让CPU不可见，但因为COHERENT，数据已自动同步）
 
+        // 3. 创建设备本地顶点缓冲区（最终存储位置）
+        // -----------------------------------------------
+        // - 作用：存储最终顶点数据，供GPU高效访问
+        // - 内存属性：设备本地（DEVICE_LOCAL），通常位于显存，CPU不可见
+        // - 用途：作为传输目标（TRANSFER_DST） + 顶点数据（VERTEX_BUFFER）
+        createBuffer(
+            bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,   // 用途：数据传输目标 + 顶点数据
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,                                    // GPU高效内存
+            vertexBuffer,
+            vertexBufferMemory
+        );
+
+        // 4. 将数据从暂存缓冲区复制到设备本地缓冲区
+        // -----------------------------------------------
+        // - 使用GPU命令（vkCmdCopyBuffer）在设备内部完成高效传输
+        copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+
+        // 5. 销毁暂存资源（数据已转移，不再需要）
+        // -----------------------------------------------
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+    }
+
+    // 创建索引缓冲区（用于存储顶点索引数据，描述顶点连接顺序）
+    void createIndexBuffer() {
+        // 计算索引数据总字节数 = 单个索引大小 × 索引数量
+        VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+
+        // 1. 创建暂存缓冲区（Staging Buffer）
+        // -----------------------------------------------
+        // - 作用：临时存储CPU端索引数据，用于中转至GPU高效内存
+        // - 内存属性：CPU可见（HOST_VISIBLE） + 自动同步（HOST_COHERENT）
+        // - 用途：数据传输源（TRANSFER_SRC）
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+        // 2. 将索引数据从CPU复制到暂存缓冲区
+        // -----------------------------------------------
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, indices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        // 3. 创建设备本地索引缓冲区（最终存储位置）
+        // -----------------------------------------------
+        // - 作用：存储最终索引数据，供GPU高效访问
+        // - 内存属性：设备本地（DEVICE_LOCAL），通常位于显存
+        // - 用途：数据传输目标（TRANSFER_DST） + 索引数据（INDEX_BUFFER）
+        createBuffer(
+            bufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT |      // 用途：数据传输目标
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,       // 用途：索引缓冲区
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,    // GPU高效内存
+            indexBuffer,
+            indexBufferMemory
+        );
+
+        // 4. 将数据从暂存缓冲区复制到设备本地缓冲区
+        // -----------------------------------------------
+        // - 内部使用vkCmdCopyBuffer命令，由GPU执行异步高速复制
+        copyBuffer(stagingBuffer, indexBuffer, bufferSize);
+
+        // 5. 销毁暂存资源（数据已转移，不再需要）
+// -----------------------------------------------
+        vkDestroyBuffer(device, stagingBuffer, nullptr);        // 销毁暂存缓冲区对象
+        vkFreeMemory(device, stagingBufferMemory, nullptr);     // 释放暂存内存
     }
 
     // 创建命令缓冲区（用于记录并提交渲染指令到GPU）
@@ -869,18 +966,88 @@ private:
         // 配置命令缓冲区分配参数
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;   // 结构体类型标识
-        
+
         // 指定从哪个命令池中分配缓冲区（需提前创建）
         allocInfo.commandPool = commandPool;
 
         // 指定为"主命令缓冲区"（可直接提交到队列执行，次级缓冲区需依附于主缓冲区）
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; 
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         allocInfo.commandBufferCount = (uint32_t)commandBuffers.size(); // 分配数量（当前仅需2个，若多帧并行处理可扩展为多个）
 
         // 从命令池中分配命令缓冲区
         if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate command buffers!");
         }
+    }
+
+    // 复制缓冲区数据（从源缓冲区到目标缓冲区）
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        // 1. 分配命令缓冲区
+        // -----------------------------------------------
+        // - 作用：用于录制并提交缓冲区复制命令
+        // - 级别：主命令缓冲区（VK_COMMAND_BUFFER_LEVEL_PRIMARY，可直接提交到队列）
+        // - 命令池：指定分配命令缓冲区的池（需与目标队列家族兼容）
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;                  // 主命令缓冲区（独立使用）
+        allocInfo.commandPool = commandPool;                                // 关联的命令池
+        allocInfo.commandBufferCount = 1;                                   // 分配1个命令缓冲区
+
+        VkCommandBuffer commandBuffer;
+        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);       // 分配命令缓冲区
+
+        // 2. 开始录制命令
+        // -----------------------------------------------
+        // - 作用：准备录制GPU命令
+        // - 标志：ONE_TIME_SUBMIT_BIT（命令缓冲区仅提交一次，执行后自动重置）
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;      // 单次提交模式
+
+        // 3. 录制缓冲区复制命令
+        // -----------------------------------------------
+        // - 作用：将数据从源缓冲区复制到目标缓冲区
+        // - 参数：
+        //   - srcOffset/dstOffset：偏移量（设为0表示从头开始复制）
+        //   - size：复制的字节数
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = 0;       // 源缓冲区起始偏移（可选，默认0）
+        copyRegion.dstOffset = 0;       // 目标缓冲区起始偏移（可选，默认0）
+        copyRegion.size = size;         // 复制的数据总大小
+
+        vkCmdCopyBuffer(
+            commandBuffer,       // 当前命令缓冲区
+            srcBuffer,           // 源缓冲区（数据来源）
+            dstBuffer,           // 目标缓冲区（数据去向）
+            1,                   // 复制的区域数量
+            &copyRegion          // 复制区域配置
+        );
+
+        vkEndCommandBuffer(commandBuffer); // 结束录制
+
+        // 4. 提交命令到图形队列并等待完成
+        // -----------------------------------------------
+        // - 作用：将命令缓冲区提交到队列执行，并阻塞CPU直到操作完成
+        // - 注意：使用vkQueueWaitIdle是简单的同步方式，但会降低性能，实际应用中建议使用栅栏（Fence）或信号量（Semaphore）
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);   // 提交到图形队列
+        vkQueueWaitIdle(graphicsQueue);                                 // 等待队列执行完成（阻塞CPU）
+
+        // 5. 释放命令缓冲区
+        // -----------------------------------------------
+        // - 作用：命令缓冲区执行完成后，将其回收至命令池
+        // - 注意：此处未销毁命令池，仅释放缓冲区（命令池可复用分配其他缓冲区）
+        vkFreeCommandBuffers(
+            device,
+            commandPool,      // 所属命令池
+            1,                // 释放的缓冲区数量
+            &commandBuffer    // 待释放的缓冲区指针
+        );
     }
 
     // 录制命令缓冲区的具体指令（定义渲染操作流程）
@@ -916,7 +1083,7 @@ private:
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
         // --- 阶段4：配置视口（画面输出区域）---
-        VkViewport viewport{};                                      
+        VkViewport viewport{};
         viewport.x = 0.0f;                                      // 视口起点X坐标
         viewport.y = 0.0f;                                      // 视口起点Y坐标 
         viewport.width = (float)swapChainExtent.width;          // 视口宽度（与窗口同宽）
@@ -935,9 +1102,11 @@ private:
         VkBuffer vertexBuffers[] = { vertexBuffer };
         VkDeviceSize offsets[] = { 0 };
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        // 将索引缓存绑定
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
         // --- 阶段6：发出绘制指令 ---
-        vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
         // 参数解释：
         // vertexCount: 顶点缓存的尺寸
         // instanceCount: 1（不启用实例化渲染）
@@ -1050,7 +1219,7 @@ private:
 
         // 步骤3：重置栅栏状态（为当前帧做准备）
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
-        
+
         // 步骤4：重置并录制命令缓冲区（定义渲染操作）
         vkResetCommandBuffer(commandBuffers[currentFrame], 0);             // 重置命令缓冲区（复用内存）
         recordCommandBuffer(commandBuffers[currentFrame], imageIndex);     // 录制绘制指令（绑定管线、视口等）
@@ -1066,7 +1235,7 @@ private:
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;        // 从交换链中获取到图像-信号量
-        submitInfo.pWaitDstStageMask = waitStages;          
+        submitInfo.pWaitDstStageMask = waitStages;
 
         // 提交的命令缓冲区（包含本帧的渲染指令）
         submitInfo.commandBufferCount = 1;
@@ -1161,7 +1330,7 @@ private:
     // 综合判断物理设备是否满足应用需求（队列/扩展/交换链支持）
     bool isDeviceSuitable(VkPhysicalDevice device) {
         // ▼ 条件1：检查设备是否支持必要的队列家族（图形队列和呈现队列）
-        QueueFamilyIndices indices = findQueueFamilies(device); 
+        QueueFamilyIndices indices = findQueueFamilies(device);
 
         // ▼ 条件2：检查设备是否支持所有要求的扩展（如交换链扩展）
         bool extensionsSupported = checkDeviceExtensionSupport(device);
@@ -1176,7 +1345,7 @@ private:
         // 所有条件必须同时满足：队列完整、扩展支持、交换链可用
         return indices.isComplete() && extensionsSupported && swapChainAdequate;
     }
-    
+
     // 检查物理设备（GPU) 是否支持所有必须的扩展
     bool checkDeviceExtensionSupport(VkPhysicalDevice device) {
         // 获取设备支持的扩展总数
@@ -1201,7 +1370,7 @@ private:
     // 遍历设备的所有队列家族，记录支持的队列索引
     QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
         QueueFamilyIndices indices;
-        
+
         uint32_t queueFamilyCount = 0;
         // 获取队列家族数量
         vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
