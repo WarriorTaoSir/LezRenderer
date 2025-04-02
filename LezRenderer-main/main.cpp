@@ -2,7 +2,10 @@
 #define GLFW_INCLUDE_VULKAN // 让GLFW自动包含Vulkan头文件
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
+#define GLM_FORCE_RADIANS                   // 统一使用radiance
 #include <GLFW/glfw3native.h>
+#include <glm/glm.hpp>                      // 
+#include <glm/gtc/matrix_transform.hpp>     // 包含模型变换等函数
 
 #include <iostream>
 #include <stdexcept>
@@ -19,6 +22,8 @@
 
 #include <glm/glm.hpp>
 #include <array>
+
+#include <chrono>       // 公开了进行精准计时的函数。
 
 // 窗口尺寸常量
 const uint32_t WIDTH = 800;
@@ -131,6 +136,13 @@ const std::vector<uint16_t> indices = {
     0, 1, 2, 2, 3, 0
 };
 
+// 全局变量
+struct UniformBufferObject {
+    glm::mat4 model;
+    glm::mat4 view;
+    glm::mat4 proj;
+};
+
 // 主应用程序类
 class HelloTriangleApplication {
 public:
@@ -159,6 +171,7 @@ private:
     std::vector<VkImageView> swapChainImageViews;       // 交换链的图像视图
     VkRenderPass renderPass;                            // 渲染通道
 
+    VkDescriptorSetLayout descriptorSetLayout;          // 描述符集布局
     VkPipelineLayout pipelineLayout;                    // 管线布局
     VkPipeline graphicsPipeline;                        // 图形管线
     std::vector<VkFramebuffer> swapChainFramebuffers;   // 交换链帧缓冲
@@ -180,6 +193,11 @@ private:
     // Vulkan缓冲对应的设备内存
     VkDeviceMemory vertexBufferMemory;
     VkDeviceMemory indexBufferMemory;
+
+    // UBO
+    std::vector<VkBuffer> uniformBuffers;
+    std::vector<VkDeviceMemory> uniformBuffersMemory;
+    std::vector<void*> uniformBuffersMapped;
 
 private:
     // 初始化GLFW窗口
@@ -203,11 +221,13 @@ private:
         createSwapChain();
         createImageViews();
         createRenderPass();
+        createDescriptorSetLayout();
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
         createVertexBuffer();
         createIndexBuffer();
+        createUniformBuffers();
         createCommandBuffers();
         createSyncObjects();
     }
@@ -227,6 +247,15 @@ private:
     // 释放资源
     void cleanup() {
         cleanupSwapChain();
+
+        // 销毁UBO
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroyBuffer(device, uniformBuffers[i], nullptr);
+            vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
+        }
+
+        // 销毁描述符集布局
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
         // 销毁索引Buffer以及回收对印内存
         vkDestroyBuffer(device, indexBuffer, nullptr);
@@ -646,6 +675,26 @@ private:
         }
     }
 
+    // 创建描述符 集 布局
+    void createDescriptorSetLayout() {
+        // 描述符绑定配置（对应着色器中的 binding=0）
+        VkDescriptorSetLayoutBinding uboLayoutBinding{};
+        uboLayoutBinding.binding = 0;                       // 绑定位置（与着色器中的 layout(binding=0) 对应）
+        uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;    // 类型：UBO
+        uboLayoutBinding.descriptorCount = 1;               // UBO 数量（此处为单个，也可用于数组）
+        uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;   // 生效的着色器阶段（顶点着色器）
+        uboLayoutBinding.pImmutableSamplers = nullptr; // Optional
+
+        // 创建描述符集布局 createInfo
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 1;
+        layoutInfo.pBindings = &uboLayoutBinding;
+
+        // 创建描述符集布局
+        vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
+    }
+
     // 创建图形管线
     void createGraphicsPipeline() {
         // 1. 读取预编译的顶点和片段着色器字节码（SPIR-V格式）
@@ -960,6 +1009,21 @@ private:
         vkFreeMemory(device, stagingBufferMemory, nullptr);     // 释放暂存内存
     }
 
+    // 创建Uniform Buffer
+    void createUniformBuffers() {
+        VkDeviceSize bufferSize = sizeof(UniformBufferObject);
+
+        uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+        uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffers[i], uniformBuffersMemory[i]);
+
+            vkMapMemory(device, uniformBuffersMemory[i], 0, bufferSize, 0, &uniformBuffersMapped[i]);
+        }
+    }
+
     // 创建命令缓冲区（用于记录并提交渲染指令到GPU）
     void createCommandBuffers() {
         commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1193,6 +1257,30 @@ private:
         throw std::runtime_error("failed to find suitable memory type!");
     }
 
+    // 更新Uniform Buffer数据（每帧调用）
+    void updateUniformBuffer(uint32_t currentImage) {
+        // 记录初始时间（static确保只初始化一次，后续调用保留值）
+        static auto startTime = std::chrono::high_resolution_clock::now();
+
+        // 获取当前时间，并计算从初始时间到现在的总秒数
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
+
+        // 创建Uniform Buffer Object (UBO) 并填充数据
+        UniformBufferObject ubo{};
+        // 模型矩阵：绕Z轴随时间旋转（每秒旋转90度）
+        ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        // 视图矩阵：摄像机位于(2,2,2)，看向原点(0,0,0)，上方向为Z轴
+        ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        // 投影矩阵：45度透视投影，宽高比适配交换链分辨率，近平面0.1，远平面10
+        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
+        // 修正Vulkan的Y轴坐标系（与OpenGL相反，翻转Y轴投影矩阵分量）
+        ubo.proj[1][1] *= -1;
+
+        // 将UBO数据直接复制到当前帧的映射内存中（无需映射/解映射操作）
+        memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+    }
+
     // 绘制帧
     void drawFrame() {
         // 步骤1：等待前一帧渲染完成（避免资源竞争）
@@ -1216,6 +1304,9 @@ private:
         else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
             throw std::runtime_error("failed to acquire swap chain image!");
         }
+
+        // 更新UBO
+        updateUniformBuffer(currentFrame);
 
         // 步骤3：重置栅栏状态（为当前帧做准备）
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
