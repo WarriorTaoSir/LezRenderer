@@ -138,6 +138,7 @@ const std::vector<uint16_t> indices = {
 
 // 全局变量
 struct UniformBufferObject {
+
     glm::mat4 model;
     glm::mat4 view;
     glm::mat4 proj;
@@ -198,6 +199,8 @@ private:
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;
     std::vector<void*> uniformBuffersMapped;
+    VkDescriptorPool descriptorPool;                    // 描述符池
+    std::vector<VkDescriptorSet> descriptorSets;        // 描述符集 数组
 
 private:
     // 初始化GLFW窗口
@@ -228,6 +231,8 @@ private:
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
+        createDescriptorPool();
+        createDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
     }
@@ -253,6 +258,9 @@ private:
             vkDestroyBuffer(device, uniformBuffers[i], nullptr);
             vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
         }
+
+        // 销毁描述符集池
+        vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 
         // 销毁描述符集布局
         vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
@@ -756,7 +764,7 @@ private:
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
         rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterizer.depthBiasEnable = VK_FALSE;
 
         // 10. 配置多重采样（当前禁用）
@@ -796,8 +804,8 @@ private:
         // 14. 创建管线布局（当前无描述符集或推送常量）
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.setLayoutCount = 0;
-        pipelineLayoutInfo.pushConstantRangeCount = 0;
+        pipelineLayoutInfo.setLayoutCount = 1;
+        pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
 
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create pipeline layout!");
@@ -1024,6 +1032,68 @@ private:
         }
     }
 
+    // 创建描述符 池
+    void createDescriptorPool() {
+        // 定义池中描述符的类型和数量
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;  // 类型：Uniform Buffer
+        poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT); // 数量：每帧一个
+
+        // 创建描述符池的配置信息
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 1;                     // 池类型数量（此处只有一种类型）
+        poolInfo.pPoolSizes = &poolSize;                // 指向类型配置的指针
+        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT); // 最大可分配的描述符集数量
+    
+        // 创建描述符池
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create descriptor pool!");
+        }
+    }
+
+    // 创建描述符 集
+    void createDescriptorSets() {
+        // 为每帧分配相同布局的描述符集
+        std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;              // 从哪个池分配
+        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT); // 分配数量（每帧一个）
+        allocInfo.pSetLayouts = layouts.data();                 // 描述符集布局数组
+
+        // 分配描述符集（每个描述符集对应一帧）
+        descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+        if (vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data()) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate descriptor sets!");
+        }
+
+        // 配置每个描述符集（绑定Uniform Buffer）
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            // 描述符引用的Uniform Buffer信息
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = uniformBuffers[i];          // 当前帧的Uniform Buffer
+            bufferInfo.offset = 0;                          // 数据起始偏移量
+            bufferInfo.range = sizeof(UniformBufferObject); // 数据总大小（或VK_WHOLE_SIZE）
+
+            // 构造描述符写入操作
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = descriptorSets[i];     // 目标描述符集（当前帧）
+            descriptorWrite.dstBinding = 0;                 // 绑定点（与着色器中的binding=0对应）
+            descriptorWrite.dstArrayElement = 0;            // 数组索引（非数组时为0）
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // 类型：UBO
+            descriptorWrite.descriptorCount = 1;            // 绑定的描述符数量（单个）
+            descriptorWrite.pBufferInfo = &bufferInfo;      // 缓冲区信息指针
+
+            //descriptorWrite.pImageInfo = nullptr;           // Optional
+            //descriptorWrite.pTexelBufferView = nullptr;     // Optional
+
+            // 更新描述符集（将配置提交到GPU）
+            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        }
+    }
+
     // 创建命令缓冲区（用于记录并提交渲染指令到GPU）
     void createCommandBuffers() {
         commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1168,6 +1238,10 @@ private:
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
         // 将索引缓存绑定
         vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+        // 绑定描述符集
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+
 
         // --- 阶段6：发出绘制指令 ---
         vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
