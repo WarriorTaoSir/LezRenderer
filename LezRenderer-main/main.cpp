@@ -7,6 +7,10 @@
 #include <glm/glm.hpp>                      // 
 #include <glm/gtc/matrix_transform.hpp>     // 包含模型变换等函数
 
+// 图像读取
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>              
+
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
@@ -190,10 +194,12 @@ private:
     // Vulkan缓冲句柄
     VkBuffer vertexBuffer;
     VkBuffer indexBuffer;
+    VkImage textureImage;
 
     // Vulkan缓冲对应的设备内存
     VkDeviceMemory vertexBufferMemory;
     VkDeviceMemory indexBufferMemory;
+    VkDeviceMemory textureImageMemory;
 
     // UBO
     std::vector<VkBuffer> uniformBuffers;
@@ -228,6 +234,7 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
+        createTextureImage();
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
@@ -252,6 +259,10 @@ private:
     // 释放资源
     void cleanup() {
         cleanupSwapChain();
+
+        // 销毁图片以及对应Device Memory
+        vkDestroyImage(device, textureImage, nullptr);
+        vkFreeMemory(device, textureImageMemory, nullptr);
 
         // 销毁UBO
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -891,6 +902,253 @@ private:
         }
     }
 
+    // 创建Vulkan图像对象并分配内存
+    void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
+        // 1. 配置图像创建信息
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;  // 结构体类型标识
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;                 // 2D纹理（还有1D/3D类型）
+        imageInfo.extent.width = width;                         // 图像宽度
+        imageInfo.extent.height = height;                       // 图像高度
+        imageInfo.extent.depth = 1;                             // 深度（3D图像时才>1）
+        imageInfo.mipLevels = 1;                                // Mipmap层级数（暂不启用）
+        imageInfo.arrayLayers = 1;                              // 图像数组层数（用于纹理数组）
+        imageInfo.format = format;                              // 像素格式，必须与后续视图一致
+        imageInfo.tiling = tiling;                              // 内存布局方式：
+                                                                // LINEAR-线性排列（方便CPU访问）
+                                                                // OPTIMAL-硬件优化排列（GPU高效）
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;    // 初始布局（后续会转换）
+        imageInfo.usage = usage;                                // 图像用途组合（传输、采样等）
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;              // 多重采样数（默认关闭）
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;      // 独占访问模式（无需跨队列共享）
+
+        // 2. 创建图像对象
+        if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create image!");
+        }
+
+        // 3. 查询图像内存需求（获取需要分配的内存大小和对齐要求）
+        VkMemoryRequirements memRequirements;
+        vkGetImageMemoryRequirements(device, image, &memRequirements);
+
+        // 4. 配置内存分配信息
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        // 寻找符合要求的内存类型（如设备本地内存）
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+        // 5. 分配设备内存
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate image memory!");
+        }
+
+        // 6. 将内存绑定到图像对象（类似OpenGL的glBindBuffer）
+        vkBindImageMemory(device, image, imageMemory, 0);
+    }
+
+    // 创建纹理贴图的核心函数
+    // 流程：加载图片文件 → 暂存到CPU可见缓冲区 → 复制到GPU专用图像 → 转换图像布局供着色器使用
+    void createTextureImage() {
+        // 1. 加载图片文件
+        int texWidth, texHeight, texChannels;
+        // 使用stb_image库加载JPG图片，强制转换为RGBA格式（4通道）
+        stbi_uc* pixels = stbi_load("textures/thunderstorm.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        VkDeviceSize imageSize = texWidth * texHeight * 4;
+
+        // 检查图片加载是否成功
+        if (!pixels) {
+            throw std::runtime_error("failed to load texture image!");
+        }
+
+        // 2. 创建暂存缓冲区（Staging Buffer）
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+
+        // 创建CPU可见的缓冲区
+        // 创建CPU可见的临时缓冲区：
+        // - 用途：作为传输源（TRANSFER_SRC_BIT）
+        // - 内存属性：主机可见（可映射） + 主机相干（自动同步CPU/GPU内存）
+        createBuffer(imageSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT, // 后续要作为传输源
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | // CPU可访问
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, // 自动内存同步
+            stagingBuffer, stagingBufferMemory);
+
+        // 3. 将像素数据复制到暂存缓冲区
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+            memcpy(data, pixels, static_cast<size_t>(imageSize));
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        stbi_image_free(pixels);// 释放STB图像数据（不再需要CPU端原始数据）
+
+        // 4. 创建GPU专用的纹理图像：
+        // - 格式：R8G8B8A8_SRGB（sRGB颜色空间）
+        // - 平铺方式：OPTIMAL（GPU优化布局，CPU不可直接访问）
+        // - 用途：传输目标 + 着色器采样
+        // - 内存属性：DEVICE_LOCAL（GPU专用内存，访问速度快）
+        createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
+        
+        // 5. 执行数据传输和布局转换流程：
+        // (1) 转换布局：UNDEFINED → TRANSFER_DST_OPTIMAL（准备接收数据）
+        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        // (2) 从暂存缓冲区复制数据到纹理图像
+        copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+        // (3) 转换布局：TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL（着色器采样优化）
+        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        // 6. 清理临时资源
+        vkDestroyBuffer(device, stagingBuffer, nullptr);    // 销毁暂存缓冲区对象
+        vkFreeMemory(device, stagingBufferMemory, nullptr); // 释放暂存缓冲区内存
+    }
+
+    // 创建并开始一个一次性使用的命令缓冲区
+    // 适用场景：短期存在的GPU操作（如传输数据），执行后立即销毁
+    VkCommandBuffer beginSingleTimeCommands() {
+        // 命令缓冲区分配信息
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = commandPool;
+        allocInfo.commandBufferCount = 1;
+
+        VkCommandBuffer commandBuffer;
+        // 从命令池分配命令缓冲区
+        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+        // 命令缓冲区开始记录信息
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        // 开始命令缓冲区记录状态
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+        return commandBuffer;// 返回已开始记录的命令缓冲区
+    }
+
+    // 提交并销毁一次性命令缓冲区
+    // 注意：包含隐式 GPU-CPU 同步（vkQueueWaitIdle），适用于低频操作
+    void endSingleTimeCommands(VkCommandBuffer commandBuffer) {
+        // 结束命令缓冲区记录
+        vkEndCommandBuffer(commandBuffer);
+
+        // 提交信息配置
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;                  // 提交1个命令缓冲区
+        submitInfo.pCommandBuffers = &commandBuffer;        // 指向要提交的命令缓冲区
+
+        // 提交到图形队列（假设 graphicsQueue 已初始化）
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);   
+        // 等待队列执行完成（强制同步，确保命令完成）
+        vkQueueWaitIdle(graphicsQueue);                                 
+        // 释放命令缓冲区回命令池（不会销毁命令池本身）
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+    }
+
+    // 图像布局转换函数
+    // 用途：安全地改变图像的Vulkan内存布局，确保GPU操作的正确同步
+    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+        // 获取一次性命令缓冲区（用于短期存在的操作）
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+        // 配置图像内存屏障
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER; // 标准Vulkan结构体类型标识
+        barrier.oldLayout = oldLayout;                          // 当前内存布局
+        barrier.newLayout = newLayout;                          // 目标内存布局
+        // 以下参数表示不转移队列所有权（同一队列家族使用）
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;  
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;                                  // 目标图像对象
+        // 配置图像子资源范围（影响整个图像）
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+
+        // 定义管线阶段和访问掩码（确保正确的执行顺序和内存可见性）
+        VkPipelineStageFlags sourceStage;
+        VkPipelineStageFlags destinationStage;
+
+        // 情况1：从未初始化状态 -> 传输目标优化布局
+        if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            // 访问权限配置：
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            // 管线阶段配置：
+            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+        // 情况2：从传输目标优化布局 -> 着色器只读优化布局
+        } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            // 访问权限配置：
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            // 管线阶段配置：
+            sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
+        else {
+            // 不支持其他布局转换（可扩展添加更多情况）
+            throw std::invalid_argument("unsupported layout transition!");
+        }
+
+        // 提交管线屏障命令
+        vkCmdPipelineBarrier(
+            commandBuffer,                   // 命令缓冲区
+            sourceStage, destinationStage,   // 源和目标管线阶段
+            0,                               // 依赖标志（0表示无特殊依赖）
+            0, nullptr,                      // 内存屏障数量和数据（此处未使用）
+            0, nullptr,                      // 缓冲区内存屏障数量和数据（此处未使用）
+            1, &barrier                      // 图像内存屏障数量和数据
+        );
+
+        // 提交并执行命令缓冲区（包含隐式等待操作）
+        endSingleTimeCommands(commandBuffer);
+    }
+
+    // 将缓冲区数据复制到图像的辅助函数
+    // 用途：用于将CPU/缓冲区中的像素数据（如纹理）传输到GPU图像对象
+    void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+        // 获取一次性命令缓冲区（适用于短期操作）
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+        // 配置缓冲区到图像的复制区域信息
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        // 定义目标图像的子资源信息
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        // 定义图像写入位置和范围
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = {
+            width,
+            height,
+            1
+        };
+
+        // 提交缓冲区到图像的复制命令
+        // 注意：目标图像必须处于 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL 布局
+        vkCmdCopyBufferToImage(
+            commandBuffer,                   // 命令缓冲区
+            buffer,                          // 源缓冲区
+            image,                           // 目标图像
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, // 目标图像的布局（必须为此布局）
+            1,                               // 区域数量
+            &region                          // 区域配置指针
+        );
+
+        // 提交并等待命令执行完成（确保数据传输完毕）
+        endSingleTimeCommands(commandBuffer);
+    }
     // 创建Buffer的 工具函数
     // 参数说明：缓冲区大小（字节）、缓冲区用途（顶点缓冲、传输缓冲）、内存属性、输出的缓冲区对象、输出的设备内存
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
@@ -1116,35 +1374,9 @@ private:
 
     // 复制缓冲区数据（从源缓冲区到目标缓冲区）
     void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
-        // 1. 分配命令缓冲区
-        // -----------------------------------------------
-        // - 作用：用于录制并提交缓冲区复制命令
-        // - 级别：主命令缓冲区（VK_COMMAND_BUFFER_LEVEL_PRIMARY，可直接提交到队列）
-        // - 命令池：指定分配命令缓冲区的池（需与目标队列家族兼容）
-        VkCommandBufferAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;                  // 主命令缓冲区（独立使用）
-        allocInfo.commandPool = commandPool;                                // 关联的命令池
-        allocInfo.commandBufferCount = 1;                                   // 分配1个命令缓冲区
 
-        VkCommandBuffer commandBuffer;
-        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);       // 分配命令缓冲区
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();  // 开始录制
 
-        // 2. 开始录制命令
-        // -----------------------------------------------
-        // - 作用：准备录制GPU命令
-        // - 标志：ONE_TIME_SUBMIT_BIT（命令缓冲区仅提交一次，执行后自动重置）
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;      // 单次提交模式
-
-        // 3. 录制缓冲区复制命令
-        // -----------------------------------------------
-        // - 作用：将数据从源缓冲区复制到目标缓冲区
-        // - 参数：
-        //   - srcOffset/dstOffset：偏移量（设为0表示从头开始复制）
-        //   - size：复制的字节数
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
         VkBufferCopy copyRegion{};
         copyRegion.srcOffset = 0;       // 源缓冲区起始偏移（可选，默认0）
         copyRegion.dstOffset = 0;       // 目标缓冲区起始偏移（可选，默认0）
@@ -1158,30 +1390,7 @@ private:
             &copyRegion          // 复制区域配置
         );
 
-        vkEndCommandBuffer(commandBuffer); // 结束录制
-
-        // 4. 提交命令到图形队列并等待完成
-        // -----------------------------------------------
-        // - 作用：将命令缓冲区提交到队列执行，并阻塞CPU直到操作完成
-        // - 注意：使用vkQueueWaitIdle是简单的同步方式，但会降低性能，实际应用中建议使用栅栏（Fence）或信号量（Semaphore）
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-
-        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);   // 提交到图形队列
-        vkQueueWaitIdle(graphicsQueue);                                 // 等待队列执行完成（阻塞CPU）
-
-        // 5. 释放命令缓冲区
-        // -----------------------------------------------
-        // - 作用：命令缓冲区执行完成后，将其回收至命令池
-        // - 注意：此处未销毁命令池，仅释放缓冲区（命令池可复用分配其他缓冲区）
-        vkFreeCommandBuffers(
-            device,
-            commandPool,      // 所属命令池
-            1,                // 释放的缓冲区数量
-            &commandBuffer    // 待释放的缓冲区指针
-        );
+        endSingleTimeCommands(commandBuffer);   // 结束录制，并提交，同步，释放
     }
 
     // 录制命令缓冲区的具体指令（定义渲染操作流程）
