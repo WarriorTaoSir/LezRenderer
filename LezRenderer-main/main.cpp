@@ -201,6 +201,10 @@ private:
     VkDeviceMemory indexBufferMemory;
     VkDeviceMemory textureImageMemory;
 
+    // 贴图采样相关
+    VkImageView textureImageView;
+    VkSampler textureSampler;
+
     // UBO
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;
@@ -235,6 +239,8 @@ private:
         createFramebuffers();
         createCommandPool();
         createTextureImage();
+        createTextureImageView();
+        createTextureSampler();
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
@@ -259,6 +265,12 @@ private:
     // 释放资源
     void cleanup() {
         cleanupSwapChain();
+
+
+
+        // 销毁贴图采样器 和 图像视图
+        vkDestroySampler(device, textureSampler, nullptr);
+        vkDestroyImageView(device, textureImageView, nullptr);
 
         // 销毁图片以及对应Device Memory
         vkDestroyImage(device, textureImage, nullptr);
@@ -494,6 +506,7 @@ private:
 
         // 初始化设备功能需求（此处未启用任何特殊功能）
         VkPhysicalDeviceFeatures deviceFeatures{};
+        deviceFeatures.samplerAnisotropy = VK_TRUE; // 各向异性采样
 
         // 配置逻辑设备创建信息
         VkDeviceCreateInfo createInfo{};
@@ -603,33 +616,7 @@ private:
 
         // 遍历交换链中的每个图像，为其创建对应的图像视图
         for (size_t i = 0; i < swapChainImages.size(); i++) {
-            // 配置图像视图的创建参数
-            VkImageViewCreateInfo createInfo{};
-            createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;    // 结构体类型标识
-            createInfo.image = swapChainImages[i];                          // 绑定到交换链中的第i个图像
-
-            // 定义图像视图的类型和格式
-            createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;    // 视图类型：2D纹理（也支持1D、3D、CubeMap等）
-            createInfo.format = swapChainImageFormat;       // 图像格式（需与交换链的格式一致）
-
-
-            // 配置颜色通道映射（此处保持默认RGBA顺序）
-            createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-            createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-            createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-            createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-
-            // 配置子资源范围（定义视图能访问图像的哪些部分）
-            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; // 视图用于颜色数据
-            createInfo.subresourceRange.baseMipLevel = 0;                       // 起始Mipmap级别（0表示基础级别）
-            createInfo.subresourceRange.levelCount = 1;                         // Mipmap层级数量（此处仅1级，无多级渐远）
-            createInfo.subresourceRange.baseArrayLayer = 0;                     // 起始数组层（0表示基础层）
-            createInfo.subresourceRange.layerCount = 1;                         // 数组层数量（此处仅1层，非纹理数组）
-
-            // 创建图像视图对象
-            if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) {
-                throw std::runtime_error("failed to create image views!");
-            }
+            swapChainImageViews[i] = createImageView(swapChainImages[i], swapChainImageFormat);
         }
     }
 
@@ -1001,6 +988,75 @@ private:
         // 6. 清理临时资源
         vkDestroyBuffer(device, stagingBuffer, nullptr);    // 销毁暂存缓冲区对象
         vkFreeMemory(device, stagingBufferMemory, nullptr); // 释放暂存缓冲区内存
+    }
+
+    void createTextureImageView() {
+        textureImageView = createImageView(textureImage, VK_FORMAT_R8G8B8A8_SRGB);
+    }
+
+    // 创建纹理采样器（决定如何从纹理中获取颜色）
+    // 采样器相当于GPU的"取色规则说明书"，控制纹理如何被读取和过滤
+    void createTextureSampler() {
+        // 获取物理设备属性
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        // 纹理放大/缩小时的过滤方式（解决像素不够用的问题）
+        samplerInfo.magFilter = VK_FILTER_LINEAR;       // 放大时用线性插值（平滑）
+        samplerInfo.minFilter = VK_FILTER_LINEAR;       // 缩小时同样用线性插值
+
+        // 纹理坐标超出[0,1]时的处理方式（就像决定墙纸如何铺贴）
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;  // U方向重复纹理
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;  // V方向重复纹理
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;  // W方向（3D纹理用）
+
+        // 各向异性过滤配置（消除倾斜表面的纹理模糊）
+        samplerInfo.anisotropyEnable = VK_TRUE;
+
+        samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy; // 设置硬件支持的最大值
+        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_WHITE;         // 越界区域显示为白色
+        // 坐标是否归一化（true表示使用实际像素坐标，false表示0-1标准化坐标）
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;                     // 使用标准UV坐标（0到1范围）
+        // 深度比较设置（用于阴影映射等高级特性）
+        samplerInfo.compareEnable = VK_FALSE;                               // 不启用深度比较
+        samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;                       // 比较永远返回true（无效果）
+
+        // Mipmap相关设置（多级纹理细节）
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;             // mipmap使用线性插值
+        samplerInfo.mipLodBias = 0.0f;                                      // mipmap级别偏移量
+        samplerInfo.minLod = 0.0f;                                          // 最小使用的mipmap级别
+        samplerInfo.maxLod = 0.0f;                                          // 最大使用的mipmap级别（0表示只用基础级别）
+
+        // 创建采样器对象
+        if (vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create texture sampler!");
+        }
+    }
+
+    // helper function 创建图像视图
+    VkImageView createImageView(VkImage image, VkFormat format) {
+        // 配置图像视图的创建参数
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = image;
+        // 定义图像视图的类型和格式
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = format;
+        // 配置子资源范围（定义视图能访问图像的哪些部分）
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+
+        VkImageView imageView;
+        if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create texture image view!");
+        }
+
+        return imageView;
     }
 
     // 创建并开始一个一次性使用的命令缓冲区
@@ -1715,9 +1771,12 @@ private:
             SwapChainSupportDetails swapChainSupport = querySwapChainSupport(device);
             swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
         }
+        // ▼ 条件4：要求支持各项异性采样
+        VkPhysicalDeviceFeatures supportedFeatures;
+        vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
 
         // 所有条件必须同时满足：队列完整、扩展支持、交换链可用
-        return indices.isComplete() && extensionsSupported && swapChainAdequate;
+        return indices.isComplete() && extensionsSupported && swapChainAdequate && supportedFeatures.samplerAnisotropy;
     }
 
     // 检查物理设备（GPU) 是否支持所有必须的扩展
