@@ -9,7 +9,13 @@
 
 // 图像读取
 #define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>              
+#include <stb_image.h>      
+// 模型加载
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
+
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/hash.hpp>
 
 #include <iostream>
 #include <stdexcept>
@@ -23,6 +29,7 @@
 #include <limits>       // Necessary for std::numeric_limits
 #include <algorithm>    // Necessary for std::clamp
 #include <fstream>
+#include <unordered_map>
 
 #include <glm/glm.hpp>
 #include <array>
@@ -33,6 +40,14 @@
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 const int MAX_FRAMES_IN_FLIGHT = 2;
+
+// 资源路径
+const std::string MODEL_PATH = "models/viking_room.obj";
+const std::string TEXTURE_PATH = "textures/viking_room.png";
+//const std::string MODEL_PATH = "models/revolver.obj";
+//const std::string TEXTURE_PATH = "textures/revolver_basecolor.png";
+//const std::string MODEL_PATH = "models/python.obj";
+//const std::string TEXTURE_PATH = "textures/python_basecolor.jpg";
 
 // 启用的验证层列表（Khronos官方验证层）
 const std::vector<const char*> validationLayers = {
@@ -130,7 +145,22 @@ struct Vertex {
         attributeDescriptions[2].offset = offsetof(Vertex, texCoord);
         return attributeDescriptions;
     }
+
+    bool operator==(const Vertex& other) const {
+        return pos == other.pos && color == other.color && texCoord == other.texCoord;
+    }
 };
+
+// 为自定义Vertex结构体特化标准库的哈希模板
+// 用途：使Vertex对象可作为std::unordered_map的键
+namespace std {
+    template<> struct hash<Vertex> {
+        // 组合各个属性的哈希值，生成唯一性较高的复合哈希
+        size_t operator()(Vertex const& vertex) const {
+            return ((hash<glm::vec3>()(vertex.pos) ^ (hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^ (hash<glm::vec2>()(vertex.texCoord) << 1);
+        }
+    };
+}// 必须定义在std命名空间内
 
 // 顶点属性数组
 const std::vector<Vertex> vertices = {
@@ -203,6 +233,10 @@ private:
     bool framebufferResized = false;                    // 帧缓冲是否被更改大小
     uint32_t currentFrame = 0;
 
+    // 模型的顶点与索引
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+
     // Vulkan缓冲句柄
     VkBuffer vertexBuffer;
     VkBuffer indexBuffer;
@@ -257,6 +291,7 @@ private:
         createTextureImage();
         createTextureImageView();
         createTextureSampler();
+        loadModel();
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
@@ -1005,7 +1040,7 @@ private:
         // 1. 加载图片文件
         int texWidth, texHeight, texChannels;
         // 使用stb_image库加载JPG图片，强制转换为RGBA格式（4通道）
-        stbi_uc* pixels = stbi_load("textures/thunderstorm.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         VkDeviceSize imageSize = texWidth * texHeight * 4;
 
         // 检查图片加载是否成功
@@ -1335,6 +1370,55 @@ private:
         vkBindBufferMemory(device, buffer, bufferMemory, 0);                // 绑定内存到缓冲区
     }
 
+    // 加载OBJ模型数据到顶点和索引缓冲
+    // 功能：解析.obj文件，提取顶点数据，并自动去重生成索引缓冲
+    void loadModel() {
+        // 初始化tinyobjloader数据结构
+        tinyobj::attrib_t attrib;                   // 存储顶点属性（位置/纹理坐标等）
+        std::vector<tinyobj::shape_t> shapes;       // 存储网格形状数据
+        std::vector<tinyobj::material_t> materials; // 材质数据（未使用）
+        std::string warn, err;                      // 加载过程的警告/错误信息
+
+        // 加载OBJ模型文件
+        if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str())) {
+            throw std::runtime_error(warn + err);
+        }
+
+        // 创建顶点哈希表用于去重（需为Vertex实现哈希函数）
+        std::unordered_map<Vertex, uint32_t> uniqueVertices{};
+
+        // 遍历模型中的所有形状（通常对应mesh）
+        for (const auto& shape : shapes) {
+            // 遍历形状的所有面索引
+            for (const auto& index : shape.mesh.indices) {
+                Vertex vertex{};
+
+                // 提取顶点位置（X/Y/Z坐标）
+                vertex.pos = {
+                    attrib.vertices[3 * index.vertex_index + 0],
+                    attrib.vertices[3 * index.vertex_index + 1],
+                    attrib.vertices[3 * index.vertex_index + 2]
+                };
+                // 提取并处理纹理坐标（翻转V分量以适配Vulkan坐标系）
+                vertex.texCoord = {
+                    attrib.texcoords[2 * index.texcoord_index + 0],
+                    1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
+                };
+
+                // 设置默认白色顶点颜色（应改为从材质读取）
+                vertex.color = { 1.0f, 1.0f, 1.0f };
+
+                // 顶点去重处理：如果顶点不存在于哈希表则添加
+                if (uniqueVertices.count(vertex) == 0) {
+                    uniqueVertices[vertex] = static_cast<uint32_t>(vertices.size());
+                    vertices.push_back(vertex);
+                }
+                // 添加索引
+                indices.push_back(uniqueVertices[vertex]);
+            }
+        }
+    }
+
     // 创建顶点缓冲区（用来存储顶点数据，如位置、颜色等）
     void createVertexBuffer() {
         // 计算顶点数据总字节数 = 单个顶点大小 × 顶点数量
@@ -1620,7 +1704,7 @@ private:
         VkDeviceSize offsets[] = { 0 };
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
         // 将索引缓存绑定
-        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
         // 绑定描述符集
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
