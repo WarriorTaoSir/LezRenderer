@@ -94,6 +94,7 @@ struct SwapChainSupportDetails {
 struct Vertex {
     glm::vec2 pos;      // 位置属性（2D坐标，对应顶点着色器的 location=0）
     glm::vec3 color;    // 颜色属性（RGB，对应顶点着色器的 location=1）
+    glm::vec2 texCoord; // UV属性
 
     // 生成顶点数据绑定描述（Vulkan需要此信息读取内存中的顶点数据）
     static VkVertexInputBindingDescription getBindingDescription() {
@@ -107,8 +108,8 @@ struct Vertex {
     }
 
     // 生成顶点属性描述（定义每个属性的格式和位置）
-    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+    static std::array<VkVertexInputAttributeDescription, 3> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
 
         // 位置属性（pos）的描述
         attributeDescriptions[0].binding = 0;                           // 绑定索引（与绑定描述一致）
@@ -122,16 +123,21 @@ struct Vertex {
         attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;   // 数据格式（vec3）3个32位浮点数
         attributeDescriptions[1].offset = offsetof(Vertex, color);      // 偏移量（color的起始位置）
 
+        // 描述UV属性（texcoord）
+        attributeDescriptions[2].binding = 0;
+        attributeDescriptions[2].location = 2;
+        attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[2].offset = offsetof(Vertex, texCoord);
         return attributeDescriptions;
     }
 };
 
 // 顶点属性数组
 const std::vector<Vertex> vertices = {
-    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
-    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}
 };
 
 // 顶点索引数组
@@ -683,7 +689,7 @@ private:
 
     // 创建描述符 集 布局
     void createDescriptorSetLayout() {
-        // 描述符绑定配置（对应着色器中的 binding=0）
+        // UBO 布局绑定
         VkDescriptorSetLayoutBinding uboLayoutBinding{};
         uboLayoutBinding.binding = 0;                       // 绑定位置（与着色器中的 layout(binding=0) 对应）
         uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;    // 类型：UBO
@@ -691,11 +697,22 @@ private:
         uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;   // 生效的着色器阶段（顶点着色器）
         uboLayoutBinding.pImmutableSamplers = nullptr; // Optional
 
+        // 2D 贴图采样器 布局绑定
+        VkDescriptorSetLayoutBinding samplerLayoutBinding{};
+        samplerLayoutBinding.binding = 1;
+        samplerLayoutBinding.descriptorCount = 1;
+        samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        samplerLayoutBinding.pImmutableSamplers = nullptr;
+        samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // 在片元着色器生效
+
+        // 绑定数组
+        std::array<VkDescriptorSetLayoutBinding, 2> bindings = { uboLayoutBinding, samplerLayoutBinding };
+
         // 创建描述符集布局 createInfo
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = 1;
-        layoutInfo.pBindings = &uboLayoutBinding;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
 
         // 创建描述符集布局
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
@@ -1349,16 +1366,18 @@ private:
     // 创建描述符 池
     void createDescriptorPool() {
         // 定义池中描述符的类型和数量
-        VkDescriptorPoolSize poolSize{};
-        poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;  // 类型：Uniform Buffer
-        poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT); // 数量：每帧一个
+        std::array<VkDescriptorPoolSize, 2> poolSizes{};
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;                      // 类型：Uniform Buffer
+        poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT); // 数量：每帧一个
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;              // 类型： Combined Image Sampler
+        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
         // 创建描述符池的配置信息
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 1;                     // 池类型数量（此处只有一种类型）
-        poolInfo.pPoolSizes = &poolSize;                // 指向类型配置的指针
-        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT); // 最大可分配的描述符集数量
+        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());           // 池类型数量
+        poolInfo.pPoolSizes = poolSizes.data();                                     // 指向类型配置的指针
+        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);             // 最大可分配的描述符集数量
     
         // 创建描述符池
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
@@ -1390,21 +1409,33 @@ private:
             bufferInfo.offset = 0;                          // 数据起始偏移量
             bufferInfo.range = sizeof(UniformBufferObject); // 数据总大小（或VK_WHOLE_SIZE）
 
-            // 构造描述符写入操作
-            VkWriteDescriptorSet descriptorWrite{};
-            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrite.dstSet = descriptorSets[i];     // 目标描述符集（当前帧）
-            descriptorWrite.dstBinding = 0;                 // 绑定点（与着色器中的binding=0对应）
-            descriptorWrite.dstArrayElement = 0;            // 数组索引（非数组时为0）
-            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // 类型：UBO
-            descriptorWrite.descriptorCount = 1;            // 绑定的描述符数量（单个）
-            descriptorWrite.pBufferInfo = &bufferInfo;      // 缓冲区信息指针
+            // 描述符应用的贴图信息
+            VkDescriptorImageInfo imageInfo{};
+            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfo.imageView = textureImageView;
+            imageInfo.sampler = textureSampler;
 
-            //descriptorWrite.pImageInfo = nullptr;           // Optional
-            //descriptorWrite.pTexelBufferView = nullptr;     // Optional
+            // 构造描述符写入操作
+            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+
+            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[0].dstSet = descriptorSets[i];     // 目标描述符集（当前帧）
+            descriptorWrites[0].dstBinding = 0;                 // 绑定点（与着色器中的binding=0对应）
+            descriptorWrites[0].dstArrayElement = 0;            // 数组索引（非数组时为0）
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // 类型：UBO
+            descriptorWrites[0].descriptorCount = 1;            // 绑定的描述符数量（单个）
+            descriptorWrites[0].pBufferInfo = &bufferInfo;      // 缓冲区信息指针
+
+            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[1].dstSet = descriptorSets[i];
+            descriptorWrites[1].dstBinding = 1;
+            descriptorWrites[1].dstArrayElement = 0;
+            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].pImageInfo = &imageInfo;
 
             // 更新描述符集（将配置提交到GPU）
-            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
         }
     }
 
