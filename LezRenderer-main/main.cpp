@@ -240,6 +240,10 @@ private:
     // Vulkan缓冲句柄
     VkBuffer vertexBuffer;
     VkBuffer indexBuffer;
+
+    // mipmap等级数
+    uint32_t mipLevels;
+
     VkImage textureImage;
     VkImage depthImage;
 
@@ -664,7 +668,7 @@ private:
 
         // 遍历交换链中的每个图像，为其创建对应的图像视图
         for (size_t i = 0; i < swapChainImages.size(); i++) {
-            swapChainImageViews[i] = createImageView(swapChainImages[i], swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+            swapChainImageViews[i] = createImageView(swapChainImages[i], swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
         }
     }
 
@@ -984,13 +988,13 @@ private:
     void createDepthResources() {
         VkFormat depthFormat = findDepthFormat();
 
-        createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
-        depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+        createImage(swapChainExtent.width, swapChainExtent.height, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
+        depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
     
     }
 
     // 创建Vulkan图像对象并分配内存
-    void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
+    void createImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
         // 1. 配置图像创建信息
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;  // 结构体类型标识
@@ -998,7 +1002,7 @@ private:
         imageInfo.extent.width = width;                         // 图像宽度
         imageInfo.extent.height = height;                       // 图像高度
         imageInfo.extent.depth = 1;                             // 深度（3D图像时才>1）
-        imageInfo.mipLevels = 1;                                // Mipmap层级数（暂不启用）
+        imageInfo.mipLevels = mipLevels;                                // Mipmap层级数
         imageInfo.arrayLayers = 1;                              // 图像数组层数（用于纹理数组）
         imageInfo.format = format;                              // 像素格式，必须与后续视图一致
         imageInfo.tiling = tiling;                              // 内存布局方式：
@@ -1041,6 +1045,8 @@ private:
         int texWidth, texHeight, texChannels;
         // 使用stb_image库加载JPG图片，强制转换为RGBA格式（4通道）
         stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
+
         VkDeviceSize imageSize = texWidth * texHeight * 4;
 
         // 检查图片加载是否成功
@@ -1075,23 +1081,124 @@ private:
         // - 平铺方式：OPTIMAL（GPU优化布局，CPU不可直接访问）
         // - 用途：传输目标 + 着色器采样
         // - 内存属性：DEVICE_LOCAL（GPU专用内存，访问速度快）
-        createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
+        createImage(texWidth, texHeight, mipLevels, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
         
         // 5. 执行数据传输和布局转换流程：
         // (1) 转换布局：UNDEFINED → TRANSFER_DST_OPTIMAL（准备接收数据）
-        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipLevels);
         // (2) 从暂存缓冲区复制数据到纹理图像
-        copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+            copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
         // (3) 转换布局：TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL（着色器采样优化）
-        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, mipLevels);
 
+        // 生成mipmap
+        generateMipmaps(textureImage, VK_FORMAT_R8G8B8A8_SRGB, texWidth, texHeight, mipLevels);
         // 6. 清理临时资源
         vkDestroyBuffer(device, stagingBuffer, nullptr);    // 销毁暂存缓冲区对象
         vkFreeMemory(device, stagingBufferMemory, nullptr); // 释放暂存缓冲区内存
     }
 
+    // 用于生成纹理的Mipmap链，通过多级图像缩放(Blit)操作实现，同时管理Vulkan图像布局转换
+    void generateMipmaps(VkImage image, VkFormat imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels) {
+        // 检查图像格式是否支持线性blitting
+        VkFormatProperties formatProperties;
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, imageFormat, &formatProperties);
+
+        if (!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+            throw std::runtime_error("texture image format does not support linear blitting!");
+        }
+
+        //1: 获取单次命令缓冲区
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+
+        // 初始化当前处理的Mip层级尺寸
+        int32_t mipWidth = texWidth;
+        int32_t mipHeight = texHeight;
+
+        //2：配置基础内存屏障参数
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.image = image;                                          // 操作的目标图像
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;          // 不转移队列所有权
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;// 颜色通道
+        barrier.subresourceRange.baseArrayLayer = 0;                    // 基础数组层
+        barrier.subresourceRange.layerCount = 1;                        // 单层纹理
+        barrier.subresourceRange.levelCount = 1;                        // 每次处理1个Mip层级
+
+        //3：逐级生成Mipmap
+        for (uint32_t i = 1; i < mipLevels; i++) {
+            // 3.1：转换前级Mip布局为TRANSFER_SRC_OPTIMAL
+            barrier.subresourceRange.baseMipLevel = i - 1;              // 操作i-1级
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;       // 等待前级写入完成
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;        // 准备作为Blit源
+
+            vkCmdPipelineBarrier(commandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,                 // 等待所有传输操作完成                
+                VK_PIPELINE_STAGE_TRANSFER_BIT,                 // 在传输阶段执行
+                0, 0, nullptr, 0, nullptr,1, &barrier);
+
+            // 3.2：配置Blit操作参数
+            VkImageBlit blit{};
+            // 源区域（当前Mip级）
+            blit.srcOffsets[0] = { 0, 0, 0 };
+            blit.srcOffsets[1] = { mipWidth, mipHeight, 1 };
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = i - 1;
+            blit.srcSubresource.baseArrayLayer = 0;
+            blit.srcSubresource.layerCount = 1;
+            // 目标区域（下一Mip级）
+            blit.dstOffsets[0] = { 0, 0, 0 };
+            blit.dstOffsets[1] = { mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1 };
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = i;           // 目标Mip级
+            blit.dstSubresource.baseArrayLayer = 0;
+            blit.dstSubresource.layerCount = 1;
+
+            // 3.3：执行Blit缩放操作
+            vkCmdBlitImage(commandBuffer,
+                image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &blit,
+                VK_FILTER_LINEAR);
+
+            // 3.4：转换前级Mip为SHADER_READ布局
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+            vkCmdPipelineBarrier(commandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,          // 在传输之后
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,   // 片段着色阶段可用
+                0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            // 更新尺寸为下一级
+            if (mipWidth > 1) mipWidth /= 2;
+            if (mipHeight > 1) mipHeight /= 2;
+        }
+
+        // 4：处理最后一级Mip
+        barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier);
+
+        // 5：提交命令缓冲区
+        endSingleTimeCommands(commandBuffer);
+    }
+
     void createTextureImageView() {
-        textureImageView = createImageView(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT);
+        textureImageView = createImageView(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_ASPECT_COLOR_BIT, mipLevels);
     }
 
     // 创建纹理采样器（决定如何从纹理中获取颜色）
@@ -1126,8 +1233,8 @@ private:
         // Mipmap相关设置（多级纹理细节）
         samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;             // mipmap使用线性插值
         samplerInfo.mipLodBias = 0.0f;                                      // mipmap级别偏移量
-        samplerInfo.minLod = 0.0f;                                          // 最小使用的mipmap级别
-        samplerInfo.maxLod = 0.0f;                                          // 最大使用的mipmap级别（0表示只用基础级别）
+        samplerInfo.minLod = 0.0f;               // 最小使用的mipmap级别
+        samplerInfo.maxLod = static_cast<float>(mipLevels);                 // 最大使用的mipmap级别（0表示只用基础级别）
 
         // 创建采样器对象
         if (vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler) != VK_SUCCESS) {
@@ -1173,7 +1280,7 @@ private:
     }
 
     // helper function 创建图像视图
-    VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags) {
+    VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels) {
         // 配置图像视图的创建参数
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1184,7 +1291,7 @@ private:
         // 配置子资源范围（定义视图能访问图像的哪些部分）
         viewInfo.subresourceRange.aspectMask = aspectFlags;
         viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.levelCount = mipLevels;
         viewInfo.subresourceRange.baseArrayLayer = 0;
         viewInfo.subresourceRange.layerCount = 1;
 
@@ -1243,7 +1350,7 @@ private:
 
     // 图像布局转换函数
     // 用途：安全地改变图像的Vulkan内存布局，确保GPU操作的正确同步
-    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+    void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
         // 获取一次性命令缓冲区（用于短期存在的操作）
         VkCommandBuffer commandBuffer = beginSingleTimeCommands();
 
@@ -1259,7 +1366,7 @@ private:
         // 配置图像子资源范围（影响整个图像）
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.baseMipLevel = 0;
-        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.levelCount = mipLevels;
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount = 1;
 
@@ -1402,7 +1509,7 @@ private:
                 // 提取并处理纹理坐标（翻转V分量以适配Vulkan坐标系）
                 vertex.texCoord = {
                     attrib.texcoords[2 * index.texcoord_index + 0],
-                    1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
+                    1.0f - attrib.texcoords[2 * index.texcoord_index + 1]   // 翻转一下V坐标
                 };
 
                 // 设置默认白色顶点颜色（应改为从材质读取）
